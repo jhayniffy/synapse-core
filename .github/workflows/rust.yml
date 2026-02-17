@@ -13,13 +13,32 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # Add PostgreSQL service container
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: synapse
+          POSTGRES_PASSWORD: synapse
+          POSTGRES_DB: synapse_test   # creates the database automatically
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432   # maps container's 5432 to host's 5432
+
     steps:
     - uses: actions/checkout@v4
+
     - name: Build
       run: cargo build --verbose
       env:
-        SQLX_OFFLINE: true   # <-- add this
+        SQLX_OFFLINE: true   # use cached queries for compile-time
+
     - name: Run tests
       run: cargo test --verbose
       env:
-        SQLX_OFFLINE: true   # <-- and here
+        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+        SQLX_OFFLINE: true   # optional – keeps macro checks offline
