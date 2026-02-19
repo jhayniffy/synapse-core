@@ -1,6 +1,5 @@
 mod config;
 mod db;
-mod error;
 mod handlers;
 
 use axum::{Router, extract::State, routing::get};
