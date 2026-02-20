@@ -6,8 +6,7 @@ mod middleware;
 pub mod stellar;
 
 use axum::{
-    Router,
-    middleware as axum_middleware,
+    Router, middleware as axum_middleware,
     routing::{get, post},
 };
 use middleware::idempotency::IdempotencyService;
