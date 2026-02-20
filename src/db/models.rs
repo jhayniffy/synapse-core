@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub struct Transaction {
     pub id: Uuid,
     pub stellar_account: String,
+    #[serde(with = "bigdecimal_serde")]
     pub amount: BigDecimal, // now available
     pub asset_code: String,
     pub status: String,
@@ -48,6 +49,7 @@ impl Transaction {
 pub struct Settlement {
     pub id: Uuid,
     pub asset_code: String,
+    #[serde(with = "bigdecimal_serde")]
     pub total_amount: BigDecimal,
     pub tx_count: i32,
     pub period_start: DateTime<Utc>,
@@ -55,6 +57,23 @@ pub struct Settlement {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct TransactionDlq {
+    pub id: Uuid,
+    pub transaction_id: Uuid,
+    pub stellar_account: String,
+    #[serde(with = "bigdecimal_serde")]
+    pub amount: BigDecimal,
+    pub asset_code: String,
+    pub anchor_transaction_id: Option<String>,
+    pub error_reason: String,
+    pub stack_trace: Option<String>,
+    pub retry_count: i32,
+    pub original_created_at: DateTime<Utc>,
+    pub moved_to_dlq_at: DateTime<Utc>,
+    pub last_retry_at: Option<DateTime<Utc>>,
 }
 #[cfg(test)]
 mod tests {
@@ -183,6 +202,27 @@ mod tests {
         }
         let transactions = crate::db::queries::list_transactions(&pool, 5, 0).await.unwrap();
         assert_eq!(transactions.len(), 5);
+    }
+}
+
+mod bigdecimal_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use sqlx::types::BigDecimal;
+    use std::str::FromStr;
+
+    pub fn serialize<S>(value: &BigDecimal, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BigDecimal, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        BigDecimal::from_str(&s).map_err(serde::de::Error::custom)
     }
 }
 

@@ -33,9 +33,13 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/health", get(handlers::health))
         .route("/settlements", get(handlers::settlements::list_settlements))
         .route("/settlements/:id", get(handlers::settlements::get_settlement))
+<<<<<<< feature/issue-19-dead-letter-queue
+        .route("/webhook", axum::routing::post(handlers::webhook::handle_webhook))
+=======
         .route("/callback", post(handlers::webhook::callback))
         .route("/transactions/:id", get(handlers::webhook::get_transaction))
         .route("/graphql", post(handlers::graphql::graphql_handler).get(handlers::graphql::subscription_handler))
         .route("/graphql/playground", get(handlers::graphql::graphql_playground))
+>>>>>>> main
         .with_state(state)
 }
