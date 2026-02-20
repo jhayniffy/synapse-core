@@ -7,7 +7,9 @@ mod stellar;
 mod services;
 
 use axum::{Router, extract::State, routing::{get, post}, middleware as axum_middleware};
+use http::header::HeaderValue;
 use sqlx::migrate::Migrator; // for Migrator
+use tower_http::cors::{CorsLayer, AllowOrigin};
 use std::net::SocketAddr; // for SocketAddr
 use std::path::Path; // for Path
 use tokio::net::TcpListener; // for TcpListener
@@ -88,8 +90,20 @@ async fn main() -> anyhow::Result<()> {
     let idempotency_service = IdempotencyService::new(&config.redis_url)?;
     tracing::info!("Redis idempotency service initialized");
 
+    // Build CORS layer from configurable origins
+    let cors_layer = match &config.cors_allowed_origins {
+        Some(origins) => {
+            let origins: Vec<HeaderValue> = origins
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            CorsLayer::new().allow_origin(AllowOrigin::list(origins))
+        }
+        None => CorsLayer::permissive(), // Allow any origin when not configured (dev default)
+    };
+
     // Build router with state
-    let app_state = AppState { 
+    let app_state = AppState {
         db: pool,
         horizon_client,
     };
@@ -111,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(handlers::health))
         .merge(webhook_routes)
         .merge(dlq_routes)
+        .layer(cors_layer)
         .with_state(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));

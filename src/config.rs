@@ -8,6 +8,8 @@ pub struct Config {
     pub database_url: String,
     pub stellar_horizon_url: String,
     pub redis_url: String,
+    /// Comma-separated list of allowed CORS origins (e.g. "http://localhost:3000,https://app.example.com")
+    pub cors_allowed_origins: Option<String>,
 }
 
 impl Config {
@@ -21,6 +23,7 @@ impl Config {
             database_url: env::var("DATABASE_URL")?,
             stellar_horizon_url: env::var("STELLAR_HORIZON_URL")?,
             redis_url: env::var("REDIS_URL")?,
+            cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS").ok(),
         })
     }
 }

@@ -24,13 +24,13 @@ sqlx = { version = "0.7", features = [
 bigdecimal = { version = "0.4", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-bigdecimal = { version = "0.3", features = ["serde"] }
 home = "=0.5.11"
 reqwest = { version = "0.11", features = ["json"] }
 redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
 ipnet = "2.9"
 utoipa = { version = "4", features = ["chrono", "uuid"] }
 utoipa-swagger-ui = { version = "6", features = ["axum"] }
+tower-http = { version = "0.5", features = ["cors"] }
 
 [dev-dependencies]
 mockito = "1"
