@@ -4,7 +4,7 @@ use sqlx::FromRow;
 use sqlx::types::BigDecimal;
 use uuid::Uuid;
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: Uuid,
     pub stellar_account: String,
