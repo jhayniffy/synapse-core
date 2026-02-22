@@ -4,7 +4,9 @@ pub mod error;
 pub mod handlers;
 pub mod services;
 pub mod stellar;
-// pub mod graphql;  // Temporarily commented out to resolve compilation issues
+pub mod graphql;
+pub mod schemas;
+pub mod middleware;
 
 use axum::{Router, routing::{get, post}};
 use crate::stellar::HorizonClient;

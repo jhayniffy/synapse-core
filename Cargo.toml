@@ -31,12 +31,7 @@ ipnet = "2.9"
 utoipa = { version = "4", features = ["chrono", "uuid"] }
 utoipa-swagger-ui = { version = "6", features = ["axum"] }
 tower-http = { version = "0.5", features = ["cors"] }
-cron = "0.12"
-async-trait = "0.1"
-# Commenting out GraphQL dependencies to avoid axum version conflicts temporarily
-# async-graphql = { version = "7.0.17", features = ["chrono", "uuid"] }
-# async-graphql-axum = "7.0.17"
-# tokio-stream = { version = "0.1", features = ["net"] }
+url = "2.5"
 
 [dev-dependencies]
 mockito = "1"
