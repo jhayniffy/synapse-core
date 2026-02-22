@@ -30,6 +30,7 @@ redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
 ipnet = "2.9"
 utoipa = { version = "4", features = ["chrono", "uuid"] }
 utoipa-swagger-ui = { version = "6", features = ["axum"] }
+tower-http = { version = "0.5", features = ["cors"] }
 
 [dev-dependencies]
 mockito = "1"
