@@ -139,15 +139,32 @@ async fn main() -> anyhow::Result<()> {
         pool_monitor_task(monitor_pool).await;
     });
     
-    // Create webhook routes with idempotency middleware
-    let webhook_routes = Router::new()
-        .route("/webhook", post(handlers::webhook::handle_webhook))
+    // Base routes for V1 and V2
+    let v1_webhook = Router::new()
+        .route("/webhook", post(handlers::v1::webhook::handle_webhook))
+        .route("/callback/transaction", post(handlers::v1::webhook::callback)) // Backward compatibility
         .layer(axum_middleware::from_fn_with_state(
             idempotency_service.clone(),
             middleware::idempotency::idempotency_middleware,
-        ))
-        .with_state(app_state.clone());
-    
+        ));
+
+    let v2_webhook = Router::new()
+        .route("/webhook", post(handlers::v2::webhook::handle_webhook))
+        .layer(axum_middleware::from_fn_with_state(
+            idempotency_service.clone(),
+            middleware::idempotency::idempotency_middleware,
+        ));
+
+    // Versioned routers
+    let v1_router = Router::new()
+        .route("/health", get(handlers::v1::health))
+        .merge(v1_webhook)
+        .layer(axum_middleware::from_fn(middleware::versioning::inject_deprecation_headers));
+
+    let v2_router = Router::new()
+        .route("/health", get(handlers::v2::health))
+        .merge(v2_webhook);
+
     // Create DLQ routes
     let dlq_routes = handlers::dlq::dlq_routes()
         .with_state(app_state.db.clone());
@@ -159,8 +176,13 @@ async fn main() -> anyhow::Result<()> {
         .with_state(app_state.db.clone());
 
     let app = Router::new()
+        // Unversioned routes - default to latest (V2) or specific base routes
         .route("/health", get(handlers::health))
-        .merge(webhook_routes)
+        .route("/webhook", post(handlers::webhook::handle_webhook))
+        .route("/callback/transaction", post(handlers::webhook::callback)) // Backward compatibility
+        // Versioned nests
+        .nest("/v1", v1_router)
+        .nest("/v2", v2_router)
         .merge(dlq_routes)
         .merge(admin_routes)
         .layer(cors_layer)

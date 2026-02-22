@@ -12,6 +12,8 @@ pub mod graphql;
 pub mod settlements;
 pub mod dlq;
 pub mod admin;
+pub mod v1;
+pub mod v2;
 
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
