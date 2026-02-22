@@ -5,6 +5,8 @@ mod handlers;
 mod middleware;
 mod stellar;
 mod services;
+mod utils;
+mod startup;
 
 use axum::{Router, extract::State, routing::{get, post}, middleware as axum_middleware};
 use http::header::HeaderValue;
@@ -19,6 +21,7 @@ use stellar::HorizonClient;
 use middleware::idempotency::IdempotencyService;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+use services::{JobScheduler, TransactionProcessorJob};
 
 /// OpenAPI Schema for the Synapse Core API
 #[derive(OpenApi)]
@@ -36,6 +39,7 @@ use utoipa_swagger_ui::SwaggerUi;
     components(
         schemas(
             handlers::HealthStatus,
+            handlers::DbPoolStats,
             handlers::settlements::Pagination,
             handlers::settlements::SettlementListResponse,
             handlers::webhook::WebhookPayload,
@@ -77,6 +81,10 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // Check for --dry-run flag
+    let args: Vec<String> = std::env::args().collect();
+    let dry_run = args.contains(&"--dry-run".to_string());
+
     // Database pool
     let pool = db::create_pool(&config).await?;
 
@@ -84,6 +92,21 @@ async fn main() -> anyhow::Result<()> {
     let migrator = Migrator::new(Path::new("./migrations")).await?;
     migrator.run(&pool).await?;
     tracing::info!("Database migrations completed");
+
+    // Run startup validation
+    let report = startup::validate_environment(&config, &pool).await?;
+    
+    if dry_run {
+        report.print();
+        std::process::exit(if report.is_valid() { 0 } else { 1 });
+    }
+    
+    if !report.is_valid() {
+        report.print();
+        anyhow::bail!("Startup validation failed");
+    }
+    
+    tracing::info!("✅ All startup checks passed");
 
     // Initialize Stellar Horizon client
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
@@ -105,11 +128,37 @@ async fn main() -> anyhow::Result<()> {
         None => CorsLayer::permissive(), // Allow any origin when not configured (dev default)
     };
 
+    // Initialize the job scheduler
+    let scheduler = JobScheduler::new();
+    
+    // Create and register the transaction processor job
+    let transaction_processor_job = TransactionProcessorJob::new(
+        pool.clone(),
+        horizon_client.clone(),
+    );
+    if let Err(e) = scheduler.register_job(Box::new(transaction_processor_job)).await {
+        tracing::error!("Failed to register transaction processor job: {}", e);
+        return Err(anyhow::anyhow!("Failed to register job: {}", e));
+    }
+    
+    // Start the scheduler
+    if let Err(e) = scheduler.start().await {
+        tracing::error!("Failed to start job scheduler: {}", e);
+        return Err(anyhow::anyhow!("Failed to start scheduler: {}", e));
+    }
+    tracing::info!("Job scheduler initialized and started");
+
     // Build router with state
     let app_state = AppState {
         db: pool,
         horizon_client,
     };
+    
+    // Start background pool monitoring task
+    let monitor_pool = pool.clone();
+    tokio::spawn(async move {
+        pool_monitor_task(monitor_pool).await;
+    });
     
     // Create webhook routes with idempotency middleware
     let webhook_routes = Router::new()
@@ -142,9 +191,50 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("listening on {}", addr);
     tracing::info!("Swagger UI available at http://localhost:{}/swagger-ui/", config.server_port);
 
+    // Handle graceful shutdown
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // Shutdown the scheduler when the application exits
+    if let Err(e) = scheduler.stop().await {
+        tracing::error!("Failed to stop job scheduler: {}", e);
+    }
 
     Ok(())
 }
 
+
+/// Background task to monitor database connection pool usage
+async fn pool_monitor_task(pool: sqlx::PgPool) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+    
+    loop {
+        interval.tick().await;
+        
+        let active = pool.size();
+        let idle = pool.num_idle();
+        let max = pool.options().get_max_connections();
+        let usage_percent = (active as f32 / max as f32) * 100.0;
+        
+        // Log warning if pool usage exceeds 80%
+        if usage_percent >= 80.0 {
+            tracing::warn!(
+                "Database connection pool usage high: {:.1}% ({}/{} connections active, {} idle)",
+                usage_percent,
+                active,
+                max,
+                idle
+            );
+        } else {
+            tracing::debug!(
+                "Database connection pool status: {:.1}% ({}/{} connections active, {} idle)",
+                usage_percent,
+                active,
+                max,
+                idle
+            );
+        }
+    }
+}

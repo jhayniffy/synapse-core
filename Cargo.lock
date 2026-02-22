@@ -661,6 +661,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cron"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f8c3e73077b4b4a6ab1ea5047c37c57aee77657bc8ecd6f29b0af082d0b0c07"
+dependencies = [
+ "chrono",
+ "nom",
+ "once_cell",
+]
+
+[[package]]
 name = "crossbeam-queue"
 version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3392,12 +3403,11 @@ name = "synapse-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-graphql 0.10.8",
- "async-graphql-axum",
- "axum 0.8.8",
- "base64 0.21.7",
+ "async-trait",
+ "axum",
  "bigdecimal 0.4.10",
  "chrono",
+ "cron",
  "dotenvy",
  "home",
  "ipnet",
