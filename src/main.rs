@@ -316,6 +316,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         .with_state(app_state.db.clone());
 
     let app = Router::new()
+        // Unversioned routes - default to latest (V2) or specific base routes
         .route("/health", get(handlers::health))
         .route("/settlements", get(handlers::settlements::list_settlements))
         .route("/settlements/:id", get(handlers::settlements::get_settlement))

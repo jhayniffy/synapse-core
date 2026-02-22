@@ -43,6 +43,7 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/settlements", get(handlers::settlements::list_settlements))
         .route("/settlements/:id", get(handlers::settlements::get_settlement))
         .route("/callback", post(handlers::webhook::callback))
+        .route("/callback/transaction", post(handlers::webhook::callback)) // Backward compatibility
         .route("/transactions/:id", get(handlers::webhook::get_transaction))
         .with_state(api_state)
 }
