@@ -19,6 +19,7 @@ mod middleware;
 mod services;
 mod stellar;
 mod validation;
+mod readiness;
 
 use axum::{
     Router, 
