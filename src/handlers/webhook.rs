@@ -30,6 +30,10 @@ pub struct CallbackPayload {
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct WebhookPayload {
+    pub id: String,
+    pub transaction_id: Option<String>,
+}
+
 use sqlx::types::BigDecimal;
 
 #[derive(Debug, Deserialize)]
@@ -267,6 +271,8 @@ mod tests {
         payload.callback_status = Some("a".repeat(21));
         assert!(validate_webhook_payload(payload).is_err());
     }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct WebhookResponse {
     pub success: bool,
