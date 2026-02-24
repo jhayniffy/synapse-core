@@ -179,9 +179,31 @@ mod tests {
             .expect("Failed to run migrations on test DB");
         
         // Create partition for current month (ignore if already exists)
-        let _ = sqlx::query("SELECT create_monthly_partition()")
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(
+            r#"
+            DO $$
+            DECLARE
+                partition_date DATE;
+                partition_name TEXT;
+                start_date TEXT;
+                end_date TEXT;
+            BEGIN
+                partition_date := DATE_TRUNC('month', NOW());
+                partition_name := 'transactions_y' || TO_CHAR(partition_date, 'YYYY') || 'm' || TO_CHAR(partition_date, 'MM');
+                start_date := TO_CHAR(partition_date, 'YYYY-MM-DD');
+                end_date := TO_CHAR(partition_date + INTERVAL '1 month', 'YYYY-MM-DD');
+                
+                IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = partition_name) THEN
+                    EXECUTE format(
+                        'CREATE TABLE %I PARTITION OF transactions FOR VALUES FROM (%L) TO (%L)',
+                        partition_name, start_date, end_date
+                    );
+                END IF;
+            END $$;
+            "#
+        )
+        .execute(&pool)
+        .await;
         
         pool
     }
