@@ -204,7 +204,7 @@ mod tests {
             Some(serde_json::json!({"ref": "ABC-123"})),
         );
 
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO transactions (
                 id, stellar_account, amount, asset_code, status,
@@ -212,20 +212,20 @@ mod tests {
                 memo, memo_type, metadata
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
-            tx.id,
-            tx.stellar_account,
-            tx.amount,
-            tx.asset_code,
-            tx.status,
-            tx.created_at,
-            tx.updated_at,
-            tx.anchor_transaction_id,
-            tx.callback_type,
-            tx.callback_status,
-            tx.memo,
-            tx.memo_type,
-            tx.metadata,
         )
+        .bind(tx.id)
+        .bind(&tx.stellar_account)
+        .bind(&tx.amount)
+        .bind(&tx.asset_code)
+        .bind(&tx.status)
+        .bind(tx.created_at)
+        .bind(tx.updated_at)
+        .bind(&tx.anchor_transaction_id)
+        .bind(&tx.callback_type)
+        .bind(&tx.callback_status)
+        .bind(&tx.memo)
+        .bind(&tx.memo_type)
+        .bind(&tx.metadata)
         .execute(&pool)
         .await
         .expect("Failed to insert transaction");
