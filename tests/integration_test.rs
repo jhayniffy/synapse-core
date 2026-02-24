@@ -94,7 +94,7 @@ async fn test_valid_deposit_flow() {
     });
 
     let res = client
-        .post(&format!("{}/callback", base_url))
+        .post(format!("{}/callback", base_url))
         .header("X-App-Signature", "valid-signature")
         .json(&payload)
         .send()
@@ -106,7 +106,7 @@ async fn test_valid_deposit_flow() {
     let tx_id = transaction["id"].as_str().unwrap();
 
     let res = client
-        .get(&format!("{}/transactions/{}", base_url, tx_id))
+        .get(format!("{}/transactions/{}", base_url, tx_id))
         .send()
         .await
         .unwrap();
@@ -140,7 +140,7 @@ async fn test_callback_with_memo_and_metadata() {
     });
 
     let res = client
-        .post(&format!("{}/callback", base_url))
+        .post(format!("{}/callback", base_url))
         .header("X-App-Signature", "valid-signature")
         .json(&payload)
         .send()
@@ -161,7 +161,7 @@ async fn test_callback_with_memo_and_metadata() {
     assert_eq!(transaction["metadata"]["compliance_tag"], "low_risk");
 
     let res = client
-        .get(&format!("{}/transactions/{}", base_url, tx_id))
+        .get(format!("{}/transactions/{}", base_url, tx_id))
         .send()
         .await
         .unwrap();
@@ -187,7 +187,7 @@ async fn test_callback_with_hash_memo_type() {
     });
 
     let res = client
-        .post(&format!("{}/callback", base_url))
+        .post(format!("{}/callback", base_url))
         .header("X-App-Signature", "valid-signature")
         .json(&payload)
         .send()
@@ -214,7 +214,7 @@ async fn test_callback_with_invalid_memo_type() {
     });
 
     let res = client
-        .post(&format!("{}/callback", base_url))
+        .post(format!("{}/callback", base_url))
         .header("X-App-Signature", "valid-signature")
         .json(&payload)
         .send()
@@ -240,7 +240,7 @@ async fn test_callback_with_metadata_only() {
     });
 
     let res = client
-        .post(&format!("{}/callback", base_url))
+        .post(format!("{}/callback", base_url))
         .header("X-App-Signature", "valid-signature")
         .json(&payload)
         .send()
@@ -269,7 +269,7 @@ async fn test_invalid_signature_flow() {
     });
 
     let res = client
-        .post(&format!("{}/callback", base_url))
+        .post(format!("{}/callback", base_url))
         .header("X-App-Signature", "invalid-signature")
         .json(&payload)
         .send()
