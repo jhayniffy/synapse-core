@@ -7,7 +7,7 @@ async fn test_health_check_response_structure() {
     // Note: Requires DATABASE_URL, REDIS_URL, and STELLAR_HORIZON_URL to be set
 
     // Mock test - verifying types compile correctly
-    let start_time = Instant::now();
+    let _start_time = Instant::now();
 
     // Verify DependencyStatus variants
     let healthy = DependencyStatus::Healthy {

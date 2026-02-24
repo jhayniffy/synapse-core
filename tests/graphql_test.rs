@@ -28,6 +28,9 @@ async fn test_graphql_queries() {
 
     let pool_manager = PoolManager::new(&database_url, None).await.unwrap();
     let feature_flags = FeatureFlagService::new(pool.clone());
+    let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
+    let readiness = synapse_core::ReadinessState::new();
+    
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
@@ -37,13 +40,20 @@ async fn test_graphql_queries() {
         feature_flags,
         redis_url: "redis://localhost:6379".to_string(),
         start_time: std::time::Instant::now(),
+        tx_broadcast,
+        readiness,
     };
     let app = create_app(app_state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
     });
 
     let client = reqwest::Client::new();
