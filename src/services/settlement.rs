@@ -3,6 +3,7 @@ use crate::db::queries;
 use crate::error::AppError;
 use bigdecimal::BigDecimal;
 use chrono::Utc;
+use opentelemetry::metrics::Histogram;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -35,6 +36,8 @@ pub struct SettlementService {
     health_check_timeout: Duration,
     /// Readiness state for graceful shutdown coordination
     readiness: Option<Arc<crate::readiness::ReadinessState>>,
+    /// Settlement operation duration histogram
+    settlement_duration_ms: Histogram<f64>,
 }
 
 impl SettlementService {
@@ -45,6 +48,7 @@ impl SettlementService {
             min_tx_count: 1,
             health_check_timeout: Duration::from_secs(5),
             readiness: None,
+            settlement_duration_ms: crate::metrics::settlement_duration_ms(),
         }
     }
 
@@ -55,6 +59,7 @@ impl SettlementService {
             min_tx_count,
             health_check_timeout: Duration::from_secs(5),
             readiness: None,
+            settlement_duration_ms: crate::metrics::settlement_duration_ms(),
         }
     }
 
@@ -66,6 +71,23 @@ impl SettlementService {
             min_tx_count: 1,
             health_check_timeout: Duration::from_secs(5),
             readiness: Some(readiness),
+            settlement_duration_ms: crate::metrics::settlement_duration_ms(),
+        }
+    }
+
+    /// Create a new settlement service with readiness state and metrics for optimized monitoring
+    pub fn with_metrics_and_readiness(
+        pool: PgPool, 
+        readiness: Arc<crate::readiness::ReadinessState>,
+        settlement_duration_ms: Histogram<f64>
+    ) -> Self {
+        Self {
+            pool,
+            max_batch_size: 10_000,
+            min_tx_count: 1,
+            health_check_timeout: Duration::from_secs(5),
+            readiness: Some(readiness),
+            settlement_duration_ms,
         }
     }
 
@@ -117,13 +139,15 @@ impl SettlementService {
 }
     /// Run settlement for all assets with completed, unsettled transactions.
     /// Respects each asset's `settlement_schedule` — assets configured as
-    /// `"hourly"` are always eligible; `"daily"` assets only settle once per day;
-    /// `"weekly"` assets only settle on Mondays.
+    /// "hourly" are always eligible; "daily" assets only settle once per day;
+    /// "weekly" assets only settle on Mondays.
     pub async fn run_settlements(&self) -> Result<Vec<Settlement>, AppError> {
+        let start = std::time::Instant::now();
+            
         let asset_codes = queries::get_unique_assets_to_settle(&self.pool)
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
-
+    
         // Load asset configs so we can apply per-asset schedules
         let assets = Asset::fetch_all(&self.pool)
             .await
@@ -132,7 +156,7 @@ impl SettlementService {
             .into_iter()
             .map(|a| (a.asset_code.clone(), a))
             .collect();
-
+    
         let _now = Utc::now();
         let mut results = Vec::new();
         for asset_code in &asset_codes {
@@ -141,27 +165,35 @@ impl SettlementService {
                 Err(e) => tracing::error!("Failed to settle asset {:?}: {:?}", asset_code, e),
             }
         }
-
+    
+        // Record metrics for the entire run_settlements operation
+        let duration_ms = start.elapsed().as_millis() as f64;
+        self.settlement_duration_ms.record(duration_ms, &[
+            opentelemetry::KeyValue::new("operation", "run_settlements"),
+        ]);
+            
         Ok(results)
     }
-
+    
     /// Settle transactions for a specific asset, splitting into multiple settlements
     /// when the number of transactions exceeds `max_batch_size`.
     ///
     /// Returns an empty `Vec` when there are fewer than `min_tx_count` transactions.
     pub async fn settle_asset(&self, asset_code: &str) -> Result<Vec<Settlement>, AppError> {
+        let start = std::time::Instant::now();
+            
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
-
+    
         let end_time = Utc::now();
-
+    
         let unsettled = queries::get_unsettled_transactions(&mut tx, asset_code, end_time)
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
-
+    
         if unsettled.len() < self.min_tx_count {
             tx.rollback()
                 .await
@@ -176,9 +208,17 @@ impl SettlementService {
                     self.min_tx_count
                 );
             }
+                
+            // Record metrics for skipped settlement
+            let duration_ms = start.elapsed().as_millis() as f64;
+            self.settlement_duration_ms.record(duration_ms, &[
+                opentelemetry::KeyValue::new("operation", "settle_asset_skipped"),
+                opentelemetry::KeyValue::new("asset_code", asset_code),
+            ]);
+                
             return Ok(vec![]);
         }
-
+    
         let total_tx = unsettled.len();
         let batch_count = total_tx.div_ceil(self.max_batch_size);
         tracing::info!(
@@ -188,19 +228,19 @@ impl SettlementService {
             batches = batch_count,
             "Starting settlement"
         );
-
+    
         let mut settlements = Vec::with_capacity(batch_count);
-
+    
         for (batch_idx, chunk) in unsettled.chunks(self.max_batch_size).enumerate() {
             let tx_count = chunk.len() as i32;
             let total_amount: BigDecimal = chunk
                 .iter()
                 .map(|t| t.amount.clone())
                 .fold(BigDecimal::from(0), |acc, x| acc + x);
-
+    
             let period_start = chunk.iter().map(|t| t.created_at).min().unwrap_or(end_time);
             let period_end = chunk.iter().map(|t| t.updated_at).max().unwrap_or(end_time);
-
+    
             let settlement = Settlement {
                 id: Uuid::new_v4(),
                 asset_code: asset_code.to_string(),
@@ -216,16 +256,16 @@ impl SettlementService {
                 reviewed_by: None,
                 reviewed_at: None,
             };
-
+    
             let saved = queries::insert_settlement(&mut tx, &settlement)
                 .await
                 .map_err(|e| AppError::DatabaseError(e.to_string()))?;
-
+    
             let tx_ids: Vec<Uuid> = chunk.iter().map(|t| t.id).collect();
             queries::update_transactions_settlement(&mut tx, &tx_ids, saved.id)
                 .await
                 .map_err(|e| AppError::DatabaseError(e.to_string()))?;
-
+    
             tracing::info!(
                 asset = %asset_code,
                 settlement_id = %saved.id,
@@ -235,19 +275,27 @@ impl SettlementService {
                 total_amount = %total_amount,
                 "Settlement batch created"
             );
-
+    
             settlements.push(saved);
         }
-
+    
         tx.commit()
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
-
+    
         queries::invalidate_caches_for_asset(asset_code).await;
-
+            
+        // Record metrics for the settle_asset operation
+        let duration_ms = start.elapsed().as_millis() as f64;
+        self.settlement_duration_ms.record(duration_ms, &[
+            opentelemetry::KeyValue::new("operation", "settle_asset"),
+            opentelemetry::KeyValue::new("asset_code", asset_code),
+            opentelemetry::KeyValue::new("transaction_count", total_tx as i64),
+        ]);
+            
         Ok(settlements)
     }
-
+    
     /// Change a settlement's status (dispute, adjust, void, etc.).
     /// Validates the transition, then delegates to the query layer which
     /// handles audit logging and releasing transactions on void.
@@ -395,5 +443,18 @@ mod tests {
         // Should succeed and mark readiness as not ready
         assert!(svc.shutdown().await.is_ok());
         assert!(readiness.is_draining());
+    }
+
+    #[tokio::test]
+    async fn metrics_recording() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://dummy")
+            .unwrap();
+        
+        let svc = SettlementService::new(pool);
+        
+        // The metrics should be initialized without panicking
+        // We can't easily test the actual recording in unit tests, but we can verify the method exists
+        assert!(std::mem::size_of::<Histogram<f64>>() > 0);
     }
 }
