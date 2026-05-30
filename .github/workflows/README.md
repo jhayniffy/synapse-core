@@ -5,6 +5,91 @@ The primary pipeline is [`rust.yml`](./rust.yml), which runs formatting, migrati
 safety checks, clippy, builds, unit tests, integration tests, coverage collection,
 and coverage threshold enforcement.
 
+## Session Management
+
+In this CI/CD module, a session is one isolated GitHub Actions job execution:
+`unit-tests`, `integration-tests`, or `coverage`. Session state includes the
+checked-out source, job-scoped environment variables, service containers,
+restored caches, generated build outputs, coverage files, and any temporary
+credentials exposed by GitHub Actions for that job.
+
+Application runtime sessions, user authentication state, webhook idempotency
+state, and Redis data created by tests are outside the CI/CD session boundary
+except when a job provisions local Postgres or Redis services to exercise them.
+
+### Session Lifecycle
+
+Each job follows the same lifecycle:
+
+1. GitHub creates a fresh `ubuntu-latest` runner.
+2. The workflow checks out the repository with `actions/checkout@v4`.
+3. The job installs its Rust toolchain and required test tools.
+4. `actions/cache@v4` restores Cargo registry, Cargo git, and `target/` data
+   as optimization-only state.
+5. Job-local Postgres and Redis service containers are started when required.
+6. Migrations, formatting, linting, builds, tests, and coverage commands run
+   against the checked-out source.
+7. Coverage artifacts are uploaded only from the `coverage` job.
+8. The runner, service containers, environment variables, and temporary files
+   are discarded when the job ends.
+
+Jobs do not share live processes, database contents, Redis data, environment
+variables, or generated credentials. The only intentional cross-run state is the
+GitHub Actions cache described in [Idempotency Keys](#idempotency-keys) and the
+published coverage artifact.
+
+### Job Boundaries
+
+- `unit-tests` owns formatting, migration safety, clippy, build, and library/bin
+  unit tests. It provisions Postgres because migrations and SQL-backed code paths
+  need a database session.
+- `integration-tests` owns ignored integration tests. It provisions both
+  Postgres and Redis so tests can cover database and cache/session behavior
+  without reaching shared infrastructure.
+- `coverage` depends on successful unit and integration jobs, then creates a new
+  runner session to collect and upload coverage. It does not reuse databases,
+  Redis data, or build processes from earlier jobs.
+
+### Security Rules
+
+- Treat every restored cache as untrusted input. A session must compile, lint,
+  migrate, and test the checked-out source after cache restore.
+- Keep secrets out of cache paths, artifact paths, job names, cache keys, and log
+  output. The current cache paths are limited to Cargo registry data, Cargo git
+  data, and `target/`.
+- Grant elevated permissions only to jobs that need them. The workflow grants
+  `id-token: write` only to `coverage` for Codecov OIDC support; other jobs use
+  default source read access.
+- Use job-local service credentials only for disposable CI services. The
+  Postgres password in `rust.yml` is a test credential for the runner-local
+  container, not an environment credential.
+- Do not persist `.env` files, database dumps, Redis snapshots, API keys,
+  coverage upload tokens, or generated credentials as artifacts or caches.
+- Keep session-specific data out of deterministic cache keys. Cache keys are
+  visible in workflow logs and GitHub cache metadata.
+
+### Performance Rules
+
+- Prefer session-local services over shared CI databases or Redis instances.
+  This keeps tests isolated and avoids cleanup races between parallel jobs.
+- Cache only dependency and build data that can be safely regenerated. Cache
+  misses should slow the session down, not change its result.
+- Keep cache namespaces aligned with job purpose. Coverage uses a separate cache
+  namespace because coverage instrumentation can produce different build output
+  than normal test jobs.
+- Bound compiler cache growth with `SCCACHE_CACHE_SIZE=1G`.
+
+### Validation Checklist
+
+When changing CI/CD session behavior:
+
+- Confirm every job still succeeds from a cold session with no cache restore.
+- Confirm local service containers expose only runner-local test credentials.
+- Confirm no new artifact or cache path can contain secrets or production data.
+- Confirm any new job permission is scoped to the single job that requires it.
+- Run `cargo test` before committing, and trigger a pull request workflow run for
+  behavior changes.
+
 ## Idempotency Keys
 
 In the CI/CD pipeline, an idempotency key is any deterministic value GitHub
