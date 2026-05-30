@@ -47,6 +47,32 @@ impl Default for ExportQuery {
     }
 }
 
+impl ExportQuery {
+    /// Validate the export query parameters before running the export.
+    pub fn validate(&self) -> Result<(), AppError> {
+        let format = self.format.to_lowercase();
+        if format != "csv" && format != "json" {
+            return Err(AppError::Validation(
+                "Export format must be either 'csv' or 'json'".to_string(),
+            ));
+        }
+
+        if let Some(ref from) = self.from {
+            parse_date(from)
+                .map(|_| ())
+                .map_err(|msg| AppError::Validation(msg))?;
+        }
+
+        if let Some(ref to) = self.to {
+            parse_date(to)
+                .map(|_| ())
+                .map_err(|msg| AppError::Validation(msg))?;
+        }
+
+        Ok(())
+    }
+}
+
 /// CSV row representation - uses String for amount to avoid Serialize issues with BigDecimal
 #[derive(Serialize)]
 struct TransactionCsvRow {
@@ -429,6 +455,7 @@ pub async fn export_transactions_csv(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    query.validate()?;
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -448,6 +475,7 @@ pub async fn export_transactions_json(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    query.validate()?;
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -467,6 +495,7 @@ pub async fn export_transactions(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    query.validate()?;
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -579,5 +608,46 @@ mod tests {
         assert!(where_clause.contains("created_at >="));
         assert!(where_clause.contains("created_at <"));
         assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn test_export_query_validate_invalid_format() {
+        let query = ExportQuery {
+            format: "xml".to_string(),
+            from: None,
+            to: None,
+            status: None,
+            asset_code: None,
+        };
+
+        let err = query.validate();
+        assert!(matches!(err, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn test_export_query_validate_invalid_date() {
+        let query = ExportQuery {
+            format: "csv".to_string(),
+            from: Some("2025-13-01".to_string()),
+            to: None,
+            status: None,
+            asset_code: None,
+        };
+
+        let err = query.validate();
+        assert!(matches!(err, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn test_export_query_validate_accepts_valid_params() {
+        let query = ExportQuery {
+            format: "JSON".to_string(),
+            from: Some("2025-01-01".to_string()),
+            to: Some("2025-01-02".to_string()),
+            status: Some("completed".to_string()),
+            asset_code: Some("USD".to_string()),
+        };
+
+        assert!(query.validate().is_ok());
     }
 }

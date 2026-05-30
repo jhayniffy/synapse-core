@@ -108,6 +108,23 @@ pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> 
     Ok(configs)
 }
 
+pub async fn get_active_tenant_rate_limit(pool: &PgPool, tenant_id: uuid::Uuid) -> Result<Option<i32>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT rate_limit_per_minute FROM tenants WHERE tenant_id = $1 AND is_active = true",
+        async {
+            let limit: Option<i32> = sqlx::query_scalar(
+                "SELECT rate_limit_per_minute FROM tenants WHERE tenant_id = $1 AND is_active = true",
+            )
+            .bind(tenant_id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(limit)
+        },
+    )
+    .await
+}
+
 /// Set the tenant context on a connection so PostgreSQL RLS policies fire correctly.
 /// Pass `None` for admin connections that should bypass RLS.
 pub async fn set_tenant_context(
@@ -130,15 +147,12 @@ pub async fn set_tenant_context(
 
 // --- Transaction Queries ---
 
-pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
-    with_timeout(
-        QueryTier::Write,
-        "INSERT INTO transactions ... RETURNING *",
-        crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
-            let mut db_tx = pool.begin().await?;
-
-            let result = sqlx::query_as::<_, Transaction>(
-                r#"
+async fn persist_transaction(
+    db_tx: &mut SqlxTransaction<'_, Postgres>,
+    tx: &Transaction,
+) -> Result<Transaction> {
+    sqlx::query_as::<_, Transaction>(
+        r#"
             INSERT INTO transactions (
                 id, stellar_account, amount, asset_code, status,
                 created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
@@ -146,44 +160,59 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING *
             "#,
-            )
-            .bind(tx.id)
-            .bind(&tx.stellar_account)
-            .bind(&tx.amount)
-            .bind(&tx.asset_code)
-            .bind(&tx.status)
-            .bind(tx.created_at)
-            .bind(tx.updated_at)
-            .bind(&tx.anchor_transaction_id)
-            .bind(&tx.callback_type)
-            .bind(&tx.callback_status)
-            .bind(tx.settlement_id)
-            .bind(&tx.memo)
-            .bind(&tx.memo_type)
-            .bind(&tx.metadata)
-            .fetch_one(&mut *db_tx)
-            .await?;
+    )
+    .bind(tx.id)
+    .bind(&tx.stellar_account)
+    .bind(&tx.amount)
+    .bind(&tx.asset_code)
+    .bind(&tx.status)
+    .bind(tx.created_at)
+    .bind(tx.updated_at)
+    .bind(&tx.anchor_transaction_id)
+    .bind(&tx.callback_type)
+    .bind(&tx.callback_status)
+    .bind(tx.settlement_id)
+    .bind(&tx.memo)
+    .bind(&tx.memo_type)
+    .bind(&tx.metadata)
+    .fetch_one(&mut *db_tx)
+    .await
+}
 
-            // Audit log: transaction created
-            AuditLog::log_creation(
-                &mut db_tx,
-                result.id,
-                ENTITY_TRANSACTION,
-                json!({
-                    "stellar_account": result.stellar_account,
-                    "amount": result.amount.to_string(),
-                    "asset_code": result.asset_code,
-                    "status": result.status,
-                    "anchor_transaction_id": result.anchor_transaction_id,
-                    "callback_type": result.callback_type,
-                    "callback_status": result.callback_status,
-                    "memo": result.memo,
-                    "memo_type": result.memo_type,
-                    "metadata": result.metadata,
-                }),
-                "system",
-            )
-            .await?;
+async fn audit_transaction_creation(
+    db_tx: &mut SqlxTransaction<'_, Postgres>,
+    result: &Transaction,
+) -> Result<()> {
+    AuditLog::log_creation(
+        db_tx,
+        result.id,
+        ENTITY_TRANSACTION,
+        json!({
+            "stellar_account": result.stellar_account,
+            "amount": result.amount.to_string(),
+            "asset_code": result.asset_code,
+            "status": result.status,
+            "anchor_transaction_id": result.anchor_transaction_id,
+            "callback_type": result.callback_type,
+            "callback_status": result.callback_status,
+            "memo": result.memo,
+            "memo_type": result.memo_type,
+            "metadata": result.metadata,
+        }),
+        "system",
+    )
+    .await
+}
+
+pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO transactions ... RETURNING *",
+        crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
+            let mut db_tx = pool.begin().await?;
+
+            let result = persist_transaction(&mut db_tx, tx).await?;
+            audit_transaction_creation(&mut db_tx, &result).await?;
 
             db_tx.commit().await?;
 
@@ -1371,4 +1400,72 @@ pub async fn cleanup_expired_idempotency_keys(pool: &PgPool) -> Result<u64> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::{migrate::Migrator, PgPool};
+    use std::path::Path;
+
+    async fn setup_test_db() -> PgPool {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("Failed to connect to test DB");
+        let migrator = Migrator::new(Path::new("./migrations"))
+            .await
+            .expect("Failed to load migrations");
+        migrator.run(&pool).await.expect("Failed to run migrations");
+        pool
+    }
+
+    #[ignore = "Requires DATABASE_URL"]
+    #[tokio::test]
+    async fn test_get_active_tenant_rate_limit() {
+        let pool = setup_test_db().await;
+        let tenant_id = uuid::Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO tenants (tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(tenant_id)
+        .bind("test tenant")
+        .bind("secret")
+        .bind("GTESTACCOUNT")
+        .bind(420)
+        .bind(true)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let limit = get_active_tenant_rate_limit(&pool, tenant_id)
+            .await
+            .expect("Failed to query rate limit");
+
+        assert_eq!(limit, Some(420));
+    }
+
+    #[ignore = "Requires DATABASE_URL"]
+    #[tokio::test]
+    async fn test_get_all_tenant_configs_includes_rate_limit() {
+        let pool = setup_test_db().await;
+        let tenant_id = uuid::Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO tenants (tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(tenant_id)
+        .bind("test tenant 2")
+        .bind("secret2")
+        .bind("GTESTACCOUNT2")
+        .bind(50)
+        .bind(true)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let configs = get_all_tenant_configs(&pool).await.unwrap();
+        assert!(configs.iter().any(|cfg| cfg.tenant_id == tenant_id && cfg.rate_limit_per_minute == 50));
+    }
 }
