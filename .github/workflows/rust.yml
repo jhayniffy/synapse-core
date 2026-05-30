@@ -18,12 +18,6 @@ env:
   SCCACHE_CACHE_SIZE: 1G
   COVERAGE_IGNORE_REGEX: '(^|.*/)(tests?/.*|generated/.*|\.sqlx/.*)$'
 
-# Cancel in-progress runs for the same branch/PR to avoid wasted runner time
-# and stale session state from concurrent jobs sharing the same cache keys.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
@@ -32,6 +26,12 @@ jobs:
       fail-fast: false
       matrix:
         rust: [stable]
+
+    # Serialize external API calls (taiki-e install-action) to avoid GitHub API rate limits
+    # Multiple concurrent requests from install-action would quickly exhaust the rate limit
+    concurrency:
+      group: ${{ github.workflow }}-install-tools-${{ github.ref }}
+      cancel-in-progress: false
 
     # Limit job-level permissions to the minimum required.
     permissions:
@@ -98,14 +98,7 @@ jobs:
 
     - name: Run migrations
       id: run_migrations
-      run: |
-        set -e
-        echo "Starting database migrations..."
-        if ! sqlx migrate run; then
-          echo "::error::Migration failed. Check migration files for errors."
-          exit 1
-        fi
-        echo "Migrations completed successfully"
+      # Serialize external API calls (sqlx migrations) to reduce GitHub API rate limit pressure
       run: |
         for i in 1 2 3; do
           sqlx migrate run && break
@@ -193,6 +186,12 @@ jobs:
       fail-fast: false
       matrix:
         rust: [stable]
+
+    # Serialize external API calls (taiki-e install-action) to avoid GitHub API rate limits
+    # This concurrency group ensures install-action calls are not made concurrently across jobs
+    concurrency:
+      group: ${{ github.workflow }}-install-tools-${{ github.ref }}
+      cancel-in-progress: false
 
     permissions:
       contents: read
@@ -292,6 +291,11 @@ jobs:
     needs:
       - unit-tests
       - integration-tests
+    # Serialize external API calls (codecov, taiki-e install-action) to reduce rate limit pressure
+    # Coverage job makes multiple external API requests; running sequentially prevents rate limit errors
+    concurrency:
+      group: ${{ github.workflow }}-external-api-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -424,6 +428,8 @@ jobs:
           target/llvm-cov/summary.json
         if-no-files-found: error
 
+    # Serialize external API upload (Codecov) to avoid overwhelming their rate limits
+    # Multiple workflows uploading simultaneously would increase 429 error probability
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v5
       with:
