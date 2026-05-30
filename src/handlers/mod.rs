@@ -12,6 +12,7 @@ pub mod v2;
 pub mod webhook;
 pub mod reconnection;
 pub mod ws;
+pub mod ws_error;
 
 use crate::error::AppError;
 use crate::ApiState;
