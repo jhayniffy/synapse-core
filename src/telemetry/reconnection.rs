@@ -194,4 +194,156 @@ mod tests {
 
         assert_eq!(manager.next_backoff(), Duration::from_secs(0));
     }
+
+    // --- Additional reconnection logic tests (#453) ---
+
+    #[test]
+    fn test_default_config_values() {
+        let config = ReconnectionConfig::default();
+        assert_eq!(config.initial_backoff, Duration::from_millis(100));
+        assert_eq!(config.max_backoff, Duration::from_secs(30));
+        assert_eq!(config.backoff_multiplier, 2.0);
+        assert_eq!(config.max_failures, 5);
+        assert_eq!(config.circuit_open_duration, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_new_manager_starts_clean() {
+        let manager = ReconnectionManager::new();
+        assert_eq!(manager.failure_count(), 0);
+        // is_circuit_open takes &mut self so we need a mutable binding
+        let mut manager = manager;
+        assert!(!manager.is_circuit_open());
+    }
+
+    #[test]
+    fn test_failure_count_increments() {
+        let mut manager = ReconnectionManager::new();
+        for i in 1..=4 {
+            manager.record_failure();
+            assert_eq!(manager.failure_count(), i);
+        }
+    }
+
+    #[test]
+    fn test_circuit_stays_closed_below_threshold() {
+        let config = ReconnectionConfig {
+            max_failures: 5,
+            ..Default::default()
+        };
+        let mut manager = ReconnectionManager::with_config(config);
+
+        for _ in 0..4 {
+            manager.record_failure();
+        }
+        assert!(!manager.is_circuit_open());
+    }
+
+    #[test]
+    fn test_circuit_opens_exactly_at_threshold() {
+        let config = ReconnectionConfig {
+            max_failures: 2,
+            ..Default::default()
+        };
+        let mut manager = ReconnectionManager::with_config(config);
+
+        manager.record_failure();
+        assert!(!manager.is_circuit_open());
+        manager.record_failure();
+        assert!(manager.is_circuit_open());
+    }
+
+    #[test]
+    fn test_success_after_circuit_open_resets() {
+        let config = ReconnectionConfig {
+            max_failures: 2,
+            ..Default::default()
+        };
+        let mut manager = ReconnectionManager::with_config(config);
+
+        manager.record_failure();
+        manager.record_failure();
+        assert!(manager.is_circuit_open());
+
+        manager.record_success();
+        assert!(!manager.is_circuit_open());
+        assert_eq!(manager.failure_count(), 0);
+    }
+
+    #[test]
+    fn test_circuit_resets_after_open_duration() {
+        let config = ReconnectionConfig {
+            max_failures: 1,
+            circuit_open_duration: Duration::from_millis(1),
+            ..Default::default()
+        };
+        let mut manager = ReconnectionManager::with_config(config);
+
+        manager.record_failure();
+        assert!(manager.is_circuit_open());
+
+        // Sleep past the circuit_open_duration
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(!manager.is_circuit_open(), "Circuit should auto-reset after open duration");
+    }
+
+    #[test]
+    fn test_backoff_zero_before_any_failure() {
+        let manager = ReconnectionManager::new();
+        assert_eq!(manager.next_backoff(), Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_backoff_respects_multiplier() {
+        let config = ReconnectionConfig {
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(60),
+            backoff_multiplier: 3.0,
+            max_failures: 10,
+            ..Default::default()
+        };
+        let mut manager = ReconnectionManager::with_config(config);
+
+        manager.record_failure(); // failure 1 → base = 100ms
+        let b1 = manager.next_backoff().as_millis();
+
+        manager.record_failure(); // failure 2 → base = 300ms
+        let b2 = manager.next_backoff().as_millis();
+
+        // b2 should be roughly 3× b1 (within jitter tolerance)
+        assert!(b2 > b1, "Second backoff should exceed first");
+        assert!(b2 >= 270, "Second backoff should be near 300ms (±10% jitter)");
+    }
+
+    #[test]
+    fn test_multiple_success_calls_are_idempotent() {
+        let mut manager = ReconnectionManager::new();
+        manager.record_failure();
+        manager.record_success();
+        manager.record_success();
+        assert_eq!(manager.failure_count(), 0);
+        assert!(!manager.is_circuit_open());
+    }
+
+    #[test]
+    fn test_with_config_constructor() {
+        let config = ReconnectionConfig {
+            max_failures: 7,
+            ..Default::default()
+        };
+        let mut manager = ReconnectionManager::with_config(config.clone());
+        for _ in 0..6 {
+            manager.record_failure();
+        }
+        assert!(!manager.is_circuit_open());
+        manager.record_failure();
+        assert!(manager.is_circuit_open());
+    }
+
+    #[test]
+    fn test_default_trait_equals_new() {
+        let a = ReconnectionManager::new();
+        let b = ReconnectionManager::default();
+        assert_eq!(a.failure_count(), b.failure_count());
+    }
 }

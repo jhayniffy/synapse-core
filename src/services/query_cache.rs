@@ -1,3 +1,4 @@
+use crate::cache::{CacheValidator, ValidationError};
 use crate::middleware::idempotency::RedisCircuitBreaker;
 use lru::LruCache;
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
@@ -46,6 +47,14 @@ impl Default for CacheConfig {
     }
 }
 
+fn cache_validation_error(err: ValidationError) -> redis::RedisError {
+    redis::RedisError::from((
+        redis::ErrorKind::TypeError,
+        "cache validation failed",
+        err.to_string(),
+    ))
+}
+
 impl QueryCache {
     pub fn new(redis_url: &str) -> Result<Self, redis::RedisError> {
         let client = Client::open(redis_url)?;
@@ -75,6 +84,8 @@ impl QueryCache {
         &self,
         key: &str,
     ) -> Result<Option<T>, redis::RedisError> {
+        CacheValidator::validate_key(key).map_err(cache_validation_error)?;
+
         // Try in-memory cache first
         {
             let mut lru = self.lru.lock().unwrap();
@@ -136,6 +147,16 @@ impl QueryCache {
         value: &T,
         ttl: Duration,
     ) -> Result<(), redis::RedisError> {
+        CacheValidator::validate_key(key).map_err(cache_validation_error)?;
+        let ttl_secs = ttl.as_secs();
+        if ttl_secs == 0 {
+            return Err(cache_validation_error(ValidationError::InvalidTTL));
+        }
+        if ttl_secs > i64::MAX as u64 {
+            return Err(cache_validation_error(ValidationError::InvalidTTL));
+        }
+        CacheValidator::validate_ttl(ttl_secs as i64).map_err(cache_validation_error)?;
+
         let serialized = serde_json::to_string(value).map_err(|e| {
             redis::RedisError::from((
                 redis::ErrorKind::TypeError,
@@ -143,6 +164,8 @@ impl QueryCache {
                 e.to_string(),
             ))
         })?;
+        CacheValidator::validate_value_size(serialized.as_bytes())
+            .map_err(cache_validation_error)?;
 
         // Store in in-memory cache
         {
@@ -156,7 +179,7 @@ impl QueryCache {
         self.cb
             .call(|| async move {
                 let mut conn = client.get_multiplexed_async_connection().await?;
-                conn.set_ex(&key, serialized.clone(), ttl.as_secs()).await
+                conn.set_ex(&key, serialized.clone(), ttl_secs).await
             })
             .await
             .map_err(|e| match e {
@@ -168,6 +191,8 @@ impl QueryCache {
     }
 
     pub async fn invalidate(&self, pattern: &str) -> Result<(), redis::RedisError> {
+        CacheValidator::validate_pattern(pattern).map_err(cache_validation_error)?;
+
         // Clear in-memory cache
         {
             let mut lru = self.lru.lock().unwrap();
@@ -184,6 +209,8 @@ impl QueryCache {
     }
 
     pub async fn invalidate_exact(&self, key: &str) -> Result<(), redis::RedisError> {
+        CacheValidator::validate_key(key).map_err(cache_validation_error)?;
+
         // Clear from in-memory cache
         {
             let mut lru = self.lru.lock().unwrap();
@@ -313,5 +340,25 @@ mod tests {
         assert_eq!(cache_key_daily_totals(7), "query:daily_totals:7");
         assert_eq!(cache_key_asset_stats(), "query:asset_stats");
         assert_eq!(cache_key_asset_total("USD"), "query:asset_total:USD");
+    }
+
+    #[tokio::test]
+    async fn test_get_rejects_invalid_key() {
+        let cache = QueryCache::new("redis://localhost:6379").unwrap();
+        let result = cache.get::<String>("invalid key").await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cache validation failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_rejects_invalid_pattern() {
+        let cache = QueryCache::new("redis://localhost:6379").unwrap();
+        let result = cache.invalidate("bad@pattern").await;
+        assert!(result.is_err());
     }
 }

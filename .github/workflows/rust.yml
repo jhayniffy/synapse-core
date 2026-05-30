@@ -6,19 +6,36 @@ on:
   pull_request:
     branches: [ "develop" ]
 
+# Cancel any in-progress run for the same branch/PR so stale sessions never
+# block fresh commits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 1G
   COVERAGE_IGNORE_REGEX: '(^|.*/)(tests?/.*|generated/.*|\.sqlx/.*)$'
 
+# Cancel in-progress runs for the same branch/PR to avoid wasted runner time
+# and stale session state from concurrent jobs sharing the same cache keys.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         rust: [stable]
+
+    # Limit job-level permissions to the minimum required.
+    permissions:
+      contents: read
 
     services:
       postgres:
@@ -29,9 +46,10 @@ jobs:
           POSTGRES_DB: synapse_test
         options: >-
           --health-cmd pg_isready
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 10s
         ports:
           - 5432:5432
 
@@ -46,6 +64,11 @@ jobs:
 
     - name: Install sccache
       uses: taiki-e/install-action@sccache
+
+    # Restore the sccache daemon session between runs so the compiler-cache
+    # hit rate is maximised without leaking state across unrelated branches.
+    - name: Start sccache session
+      run: sccache --start-server || true
 
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v4
@@ -73,36 +96,106 @@ jobs:
       if: matrix.rust == 'stable'
       run: ./scripts/check-migration-safety.sh migrations
 
-
     - name: Run migrations
-      run: sqlx migrate run
+      id: run_migrations
+      run: |
+        set -e
+        echo "Starting database migrations..."
+        if ! sqlx migrate run; then
+          echo "::error::Migration failed. Check migration files for errors."
+          exit 1
+        fi
+        echo "Migrations completed successfully"
+      run: |
+        for i in 1 2 3; do
+          sqlx migrate run && break
+          echo "Migration attempt $i/3 failed, retrying in 5 seconds..."
+          sleep 5
+          [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
+        done
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+      continue-on-error: false
+
+    - name: Handle migration failure
+      if: failure() && steps.run_migrations.outcome == 'failure'
+      run: |
+        echo "::error::Database migration failed. Please review migration files and database state."
+        echo "::error::Check logs above for specific migration errors."
+        exit 1
 
     - name: Run clippy
+      id: run_clippy
       if: matrix.rust == 'stable'
-      run: cargo clippy -- -D warnings
+      run: |
+        set -e
+        echo "Running clippy linter..."
+        if ! cargo clippy -- -D warnings; then
+          echo "::error::Clippy found issues. Please fix linting errors."
+          exit 1
+        fi
+        echo "Clippy checks passed"
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+      continue-on-error: false
+
+    - name: Handle clippy failure
+      if: failure() && steps.run_clippy.outcome == 'failure'
+      run: |
+        echo "::error::Clippy linting failed. Run 'cargo clippy -- -D warnings' locally to see issues."
+        exit 1
 
     - name: Build
-      run: cargo build --verbose
+      id: build_project
+      run: |
+        set -e
+        echo "Building project..."
+        if ! cargo build --verbose; then
+          echo "::error::Build failed. Check compilation errors above."
+          exit 1
+        fi
+        echo "Build completed successfully"
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+      continue-on-error: false
+
+    - name: Handle build failure
+      if: failure() && steps.build_project.outcome == 'failure'
+      run: |
+        echo "::error::Project build failed. Review compilation errors and fix syntax/type issues."
+        exit 1
 
     - name: Run unit tests
-      run: cargo test --lib --bins --verbose
+      id: run_unit_tests
+      run: |
+        set -e
+        echo "Running unit tests..."
+        if ! cargo test --lib --bins --verbose; then
+          echo "::error::Unit tests failed. Check test output above for failures."
+          exit 1
+        fi
+        echo "Unit tests passed"
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+      continue-on-error: false
 
+    - name: Handle unit test failure
+      if: failure() && steps.run_unit_tests.outcome == 'failure'
+      run: |
+        echo "::error::Unit tests failed. Run 'cargo test --lib --bins' locally to debug."
+        exit 1
 
 
   integration-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         rust: [stable]
+
+    permissions:
+      contents: read
 
     services:
       postgres:
@@ -113,18 +206,20 @@ jobs:
           POSTGRES_DB: synapse_test
         options: >-
           --health-cmd pg_isready
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 10s
         ports:
           - 5432:5432
       redis:
         image: redis:7-alpine
         options: >-
           --health-cmd "redis-cli ping"
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 5s
         ports:
           - 6379:6379
 
@@ -135,6 +230,9 @@ jobs:
       uses: dtolnay/rust-toolchain@v1
       with:
         toolchain: ${{ matrix.rust }}
+
+    - name: Install sccache
+      uses: taiki-e/install-action@sccache
 
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v4
@@ -149,30 +247,48 @@ jobs:
           ${{ runner.os }}-${{ matrix.rust }}-cargo-
           ${{ runner.os }}-cargo-
 
-    - name: Install sccache
-      uses: taiki-e/install-action@sccache
-
     - name: Install sqlx-cli
       uses: taiki-e/install-action@v2
       with:
         tool: sqlx-cli@0.7.4
 
-
     - name: Run migrations
-      run: sqlx migrate run
+      run: |
+        for i in 1 2 3; do
+          sqlx migrate run && break
+          echo "Migration attempt $i/3 failed, retrying in 5 seconds..."
+          sleep 5
+          [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
+        done
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
     - name: Run integration tests
-      run: cargo test --verbose -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow
+      id: run_integration_tests
+      run: |
+        set -e
+        echo "Running integration tests..."
+        if ! cargo test --verbose -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow; then
+          echo "::error::Integration tests failed. Check test output for failures."
+          exit 1
+        fi
+        echo "Integration tests passed"
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
         REDIS_URL: redis://localhost:6379
+      continue-on-error: false
 
+    - name: Handle integration test failure
+      if: failure() && steps.run_integration_tests.outcome == 'failure'
+      run: |
+        echo "::error::Integration tests failed. Ensure services (postgres, redis) are running."
+        echo "::error::Run 'cargo test -- --ignored' locally to debug."
+        exit 1
 
 
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs:
       - unit-tests
       - integration-tests
@@ -189,18 +305,20 @@ jobs:
           POSTGRES_DB: synapse_test
         options: >-
           --health-cmd pg_isready
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 10s
         ports:
           - 5432:5432
       redis:
         image: redis:7-alpine
         options: >-
           --health-cmd "redis-cli ping"
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 5s
         ports:
           - 6379:6379
 
@@ -212,6 +330,9 @@ jobs:
       with:
         toolchain: stable
         components: llvm-tools-preview
+
+    - name: Install sccache
+      uses: taiki-e/install-action@sccache
 
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v4
@@ -226,9 +347,6 @@ jobs:
           ${{ runner.os }}-coverage-cargo-
           ${{ runner.os }}-cargo-
 
-    - name: Install sccache
-      uses: taiki-e/install-action@sccache
-
     - name: Install sqlx-cli
       uses: taiki-e/install-action@v2
       with:
@@ -237,23 +355,64 @@ jobs:
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
 
-
     - name: Run migrations
-      run: sqlx migrate run
+      run: |
+        for i in 1 2 3; do
+          sqlx migrate run && break
+          echo "Migration attempt $i/3 failed, retrying in 5 seconds..."
+          sleep 5
+          [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
+        done
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
     - name: Collect coverage data
+      id: collect_coverage
       run: |
-        cargo llvm-cov clean --workspace
-        cargo llvm-cov --workspace --lib --bins --no-report
-        cargo llvm-cov --workspace --no-report -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow
-        cargo llvm-cov report --html --output-dir target/llvm-cov/html --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
-        cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
-        cargo llvm-cov report --json --summary-only --output-path target/llvm-cov/summary.json --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+        set -e
+        echo "Collecting code coverage data..."
+        
+        if ! cargo llvm-cov clean --workspace; then
+          echo "::error::Failed to clean coverage data"
+          exit 1
+        fi
+        
+        if ! cargo llvm-cov --workspace --lib --bins --no-report; then
+          echo "::error::Failed to collect unit test coverage"
+          exit 1
+        fi
+        
+        if ! cargo llvm-cov --workspace --no-report -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow; then
+          echo "::error::Failed to collect integration test coverage"
+          exit 1
+        fi
+        
+        if ! cargo llvm-cov report --html --output-dir target/llvm-cov/html --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"; then
+          echo "::error::Failed to generate HTML coverage report"
+          exit 1
+        fi
+        
+        if ! cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"; then
+          echo "::error::Failed to generate LCOV coverage report"
+          exit 1
+        fi
+        
+        if ! cargo llvm-cov report --json --summary-only --output-path target/llvm-cov/summary.json --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"; then
+          echo "::error::Failed to generate JSON coverage summary"
+          exit 1
+        fi
+        
+        echo "Coverage data collection completed successfully"
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
         REDIS_URL: redis://localhost:6379
+      continue-on-error: false
+
+    - name: Handle coverage collection failure
+      if: failure() && steps.collect_coverage.outcome == 'failure'
+      run: |
+        echo "::error::Coverage collection failed. Check cargo-llvm-cov installation and test execution."
+        exit 1
 
     - name: Upload coverage artifacts
       uses: actions/upload-artifact@v4
@@ -277,8 +436,23 @@ jobs:
         verbose: true
 
     - name: Enforce coverage thresholds
+      id: enforce_coverage
       run: |
+        set -e
+        echo "Checking coverage thresholds..."
+        
+        if [ ! -f target/llvm-cov/summary.json ]; then
+          echo "::error::Coverage summary file not found"
+          exit 1
+        fi
+        
         coverage=$(jq -r '.data[0].totals.lines.percent' target/llvm-cov/summary.json)
+        
+        if [ -z "$coverage" ] || [ "$coverage" = "null" ]; then
+          echo "::error::Failed to parse coverage percentage from summary"
+          exit 1
+        fi
+        
         echo "Line coverage: ${coverage}%"
 
         if awk -v c="$coverage" 'BEGIN { exit !(c < 40) }'; then
@@ -289,3 +463,12 @@ jobs:
         if awk -v c="$coverage" 'BEGIN { exit !(c < 60) }'; then
           echo "::warning::Coverage ${coverage}% is below the warning threshold of 60%."
         fi
+        
+        echo "Coverage threshold check passed"
+      continue-on-error: false
+
+    - name: Handle coverage threshold failure
+      if: failure() && steps.enforce_coverage.outcome == 'failure'
+      run: |
+        echo "::error::Coverage threshold enforcement failed. Increase test coverage to meet minimum requirements."
+        exit 1

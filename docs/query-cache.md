@@ -14,6 +14,10 @@ The query result caching layer provides sophisticated caching for expensive aggr
 
 ## Architecture
 
+### Input validation
+
+All `QueryCache` Redis operations validate keys, patterns, values, and TTLs via [`CacheValidator`](../src/cache/validation.rs) before network I/O. See [Cache Input Validation](./cache-input-validation.md) for rules, security rationale, and troubleshooting.
+
 ### Components
 
 1. **QueryCache Service** (`src/services/query_cache.rs`)

@@ -4,6 +4,8 @@
 
 The WebSocket module provides real-time event streaming with pagination support for transaction status updates. This document describes the pagination mechanism, message protocol, and best practices for consuming real-time events.
 
+For planned server restarts and drain behavior, see [WebSocket Graceful Shutdown](websocket-graceful-shutdown.md).
+
 ## Connection
 
 ### Establishing a WebSocket Connection

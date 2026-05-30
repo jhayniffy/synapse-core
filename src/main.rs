@@ -464,6 +464,9 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         })
         .await?;
 
+    // Gracefully drain and close the database pool before exiting.
+    synapse_core::db::graceful_shutdown(&pool).await;
+
     // Flush and shut down the OTel exporter on clean exit.
     opentelemetry::global::shutdown_tracer_provider();
 

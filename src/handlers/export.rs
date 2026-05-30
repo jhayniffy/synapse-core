@@ -47,6 +47,32 @@ impl Default for ExportQuery {
     }
 }
 
+impl ExportQuery {
+    /// Validate the export query parameters before running the export.
+    pub fn validate(&self) -> Result<(), AppError> {
+        let format = self.format.to_lowercase();
+        if format != "csv" && format != "json" {
+            return Err(AppError::Validation(
+                "Export format must be either 'csv' or 'json'".to_string(),
+            ));
+        }
+
+        if let Some(ref from) = self.from {
+            parse_date(from)
+                .map(|_| ())
+                .map_err(|msg| AppError::Validation(msg))?;
+        }
+
+        if let Some(ref to) = self.to {
+            parse_date(to)
+                .map(|_| ())
+                .map_err(|msg| AppError::Validation(msg))?;
+        }
+
+        Ok(())
+    }
+}
+
 /// CSV row representation - uses String for amount to avoid Serialize issues with BigDecimal
 #[derive(Serialize)]
 struct TransactionCsvRow {
@@ -429,6 +455,7 @@ pub async fn export_transactions_csv(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    query.validate()?;
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -448,6 +475,7 @@ pub async fn export_transactions_json(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    query.validate()?;
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -467,6 +495,7 @@ pub async fn export_transactions(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    query.validate()?;
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -579,5 +608,179 @@ mod tests {
         assert!(where_clause.contains("created_at >="));
         assert!(where_clause.contains("created_at <"));
         assert_eq!(params.len(), 2);
+    }
+
+    // --- Additional data export tests (#455) ---
+
+    #[test]
+    fn test_parse_date_iso8601_with_time() {
+        let result = parse_date("2025-06-15T12:00:00Z");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_date_invalid_returns_error() {
+        let result = parse_date("not-a-date");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_date_partial_string_returns_error() {
+        let result = parse_date("2025-13-01"); // month 13 is invalid
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_filter_conditions_status_only() {
+        let status = Some("completed".to_string());
+        let (where_clause, params) = build_filter_conditions(&None, &None, &status, &None);
+        assert!(where_clause.contains("status ="));
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_build_filter_conditions_asset_code_only() {
+        let asset = Some("USDC".to_string());
+        let (where_clause, params) = build_filter_conditions(&None, &None, &None, &asset);
+        assert!(where_clause.contains("asset_code ="));
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_build_filter_conditions_all_filters() {
+        let from = Some("2025-01-01".to_string());
+        let to = Some("2025-12-31".to_string());
+        let status = Some("pending".to_string());
+        let asset = Some("USD".to_string());
+        let (where_clause, params) = build_filter_conditions(&from, &to, &status, &asset);
+        assert!(where_clause.starts_with("WHERE "));
+        assert_eq!(params.len(), 4);
+    }
+
+    #[test]
+    fn test_build_filter_conditions_invalid_date_skipped() {
+        // Invalid dates should be silently skipped (no condition added)
+        let from = Some("bad-date".to_string());
+        let (where_clause, params) = build_filter_conditions(&from, &None, &None, &None);
+        assert!(where_clause.is_empty());
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_to_date_adds_one_day() {
+        // The `to` filter should include the entire end day by adding 1 day
+        let to = Some("2025-06-01".to_string());
+        let (where_clause, _) = build_filter_conditions(&None, &to, &None, &None);
+        assert!(where_clause.contains("created_at <"));
+    }
+
+    #[test]
+    fn test_csv_row_optional_fields_default_to_empty() {
+        use bigdecimal::BigDecimal;
+        use uuid::Uuid;
+
+        let tx = Transaction {
+            id: Uuid::new_v4(),
+            stellar_account: "GABC".to_string(),
+            amount: BigDecimal::from(1),
+            asset_code: "XLM".to_string(),
+            status: "pending".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            anchor_transaction_id: None,
+            callback_type: None,
+            callback_status: None,
+            settlement_id: None,
+            memo: None,
+            memo_type: None,
+            metadata: None,
+            tenant_id: None,
+        };
+
+        let row = TransactionCsvRow::from(&tx);
+        assert_eq!(row.anchor_transaction_id, "");
+        assert_eq!(row.callback_type, "");
+        assert_eq!(row.callback_status, "");
+    }
+
+    #[test]
+    fn test_json_row_optional_fields_are_none() {
+        use bigdecimal::BigDecimal;
+        use uuid::Uuid;
+
+        let tx = Transaction {
+            id: Uuid::new_v4(),
+            stellar_account: "GABC".to_string(),
+            amount: BigDecimal::from(1),
+            asset_code: "XLM".to_string(),
+            status: "pending".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            anchor_transaction_id: None,
+            callback_type: None,
+            callback_status: None,
+            settlement_id: None,
+            memo: None,
+            memo_type: None,
+            metadata: None,
+            tenant_id: None,
+        };
+
+        let row = TransactionJsonRow::from(&tx);
+        assert!(row.anchor_transaction_id.is_none());
+        assert!(row.callback_type.is_none());
+        assert!(row.callback_status.is_none());
+    }
+
+    #[test]
+    fn test_csv_row_amount_serialised_as_string() {
+        use bigdecimal::BigDecimal;
+        use std::str::FromStr;
+        use uuid::Uuid;
+
+        let tx = Transaction {
+            id: Uuid::new_v4(),
+            stellar_account: "GABC".to_string(),
+            amount: BigDecimal::from_str("123.456").unwrap(),
+            asset_code: "USD".to_string(),
+            status: "completed".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            anchor_transaction_id: None,
+            callback_type: None,
+            callback_status: None,
+            settlement_id: None,
+            memo: None,
+            memo_type: None,
+            metadata: None,
+            tenant_id: None,
+        };
+
+        let row = TransactionCsvRow::from(&tx);
+        assert_eq!(row.amount, "123.456");
+    }
+
+    #[test]
+    fn test_export_query_default_has_no_filters() {
+        let q = ExportQuery::default();
+        assert!(q.from.is_none());
+        assert!(q.to.is_none());
+        assert!(q.status.is_none());
+        assert!(q.asset_code.is_none());
+    }
+
+    #[test]
+    fn test_filter_param_count_matches_placeholders() {
+        // Ensure the number of `$N` placeholders equals the number of params
+        let from = Some("2025-01-01".to_string());
+        let to = Some("2025-06-01".to_string());
+        let status = Some("pending".to_string());
+        let asset = Some("USD".to_string());
+        let (where_clause, params) = build_filter_conditions(&from, &to, &status, &asset);
+
+        let placeholder_count = (1..=params.len())
+            .filter(|i| where_clause.contains(&format!("${i}")))
+            .count();
+        assert_eq!(placeholder_count, params.len());
     }
 }

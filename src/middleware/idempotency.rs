@@ -210,10 +210,11 @@ impl IdempotencyService {
 
                 self.cache_misses.fetch_add(1, Ordering::Relaxed);
 
-                // Try to acquire lock
+                // Try to acquire lock; store a JSON lock value so
+                // recover_stale_locks can inspect the locked_at timestamp.
                 let acquired: bool = redis::cmd("SET")
                     .arg(&lock_key)
-                    .arg("processing")
+                    .arg(_lock_value())
                     .arg("NX")
                     .arg("EX")
                     .arg(300) // 5 minute lock
@@ -475,6 +476,14 @@ fn extract_tenant_id(request: &Request<Body>) -> String {
         .to_string()
 }
 
+fn idempotency_trace_span(idempotency_key: &str, tenant_id: &str) -> tracing::Span {
+    tracing::info_span!(
+        "idempotency.check",
+        idempotency_key = %idempotency_key,
+        tenant_id = %tenant_id
+    )
+}
+
 /// Middleware to handle idempotency for webhook requests
 pub async fn idempotency_middleware(
     State(service): State<IdempotencyService>,
@@ -483,7 +492,16 @@ pub async fn idempotency_middleware(
 ) -> Response {
     let idempotency_key = match request.headers().get("x-idempotency-key") {
         Some(key) => match key.to_str() {
-            Ok(k) => k.to_string(),
+            Ok(k) => match validate_idempotency_key(k) {
+                Ok(validated) => validated,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": e.to_string() })),
+                    )
+                        .into_response();
+                }
+            },
             Err(_) => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -500,6 +518,8 @@ pub async fn idempotency_middleware(
     };
 
     let tenant_id = extract_tenant_id(&request);
+    let span = idempotency_trace_span(&idempotency_key, &tenant_id);
+    let _enter = span.enter();
 
     match service
         .check_idempotency(&tenant_id, &idempotency_key)
@@ -665,6 +685,98 @@ pub fn validate_idempotency_key(key: &str) -> Result<String, crate::error::AppEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{collections::HashMap, fmt, sync::{Arc, Mutex}};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::{layer::Context, registry::Registry, Layer};
+
+    struct FieldCollector {
+        fields: Mutex<HashMap<String, String>>,
+    }
+
+    impl FieldCollector {
+        fn new() -> Self {
+            Self {
+                fields: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl Visit for FieldCollector {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            let mut fields = self.fields.lock().unwrap();
+            fields.insert(field.name().to_string(), format!("{:?}", value));
+        }
+
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            let mut fields = self.fields.lock().unwrap();
+            fields.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            let mut fields = self.fields.lock().unwrap();
+            fields.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            let mut fields = self.fields.lock().unwrap();
+            fields.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            let mut fields = self.fields.lock().unwrap();
+            fields.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+            let mut fields = self.fields.lock().unwrap();
+            fields.insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    struct CaptureSpanLayer {
+        captured: Arc<Mutex<Vec<HashMap<String, String>>>>,
+    }
+
+    impl<S> Layer<S> for CaptureSpanLayer
+    where
+        S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+    {
+        fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, _id: &tracing::Id, _ctx: Context<'_, S>) {
+            let mut visitor = FieldCollector::new();
+            attrs.record(&mut visitor);
+            let fields = visitor.fields.lock().unwrap().clone();
+            self.captured.lock().unwrap().push(fields);
+        }
+    }
+
+    #[test]
+    fn test_idempotency_trace_span_records_key_and_tenant() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let layer = CaptureSpanLayer {
+            captured: captured.clone(),
+        };
+
+        let subscriber = Registry::default().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = idempotency_trace_span("test-key-123", "tenant-a");
+            let _enter = span.enter();
+            tracing::info!("idempotency event");
+        });
+
+        let spans = captured.lock().unwrap();
+        assert_eq!(spans.len(), 1, "Expected exactly one captured span");
+
+        let fields = &spans[0];
+        let idempotency_key = fields
+            .get("idempotency_key")
+            .map(|s| s.trim_matches('"').to_string());
+        let tenant_id = fields
+            .get("tenant_id")
+            .map(|s| s.trim_matches('"').to_string());
+
+        assert_eq!(idempotency_key.as_deref(), Some("test-key-123"));
+        assert_eq!(tenant_id.as_deref(), Some("tenant-a"));
+    }
 
     #[test]
     fn test_validate_idempotency_key_success() {
