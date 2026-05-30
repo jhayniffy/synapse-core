@@ -34,6 +34,51 @@ pub enum RateLimitStrategy {
     SlidingWindow,
 }
 
+/// Cache-level metrics for rate limiting operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CacheMetrics {
+    acquired_requests: u64,
+    rejected_requests: u64,
+    refill_events: u64,
+}
+
+impl CacheMetrics {
+    /// Creates a new metrics collector.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a successful token acquisition.
+    pub fn record_acquired(&mut self) {
+        self.acquired_requests = self.acquired_requests.saturating_add(1);
+    }
+
+    /// Record a rejected request due to rate limiting.
+    pub fn record_rejected(&mut self) {
+        self.rejected_requests = self.rejected_requests.saturating_add(1);
+    }
+
+    /// Record a refill event when tokens are replenished.
+    pub fn record_refill(&mut self) {
+        self.refill_events = self.refill_events.saturating_add(1);
+    }
+
+    /// Returns the number of acquired requests.
+    pub fn acquired_requests(&self) -> u64 {
+        self.acquired_requests
+    }
+
+    /// Returns the number of rejected requests.
+    pub fn rejected_requests(&self) -> u64 {
+        self.rejected_requests
+    }
+
+    /// Returns the number of refill events.
+    pub fn refill_events(&self) -> u64 {
+        self.refill_events
+    }
+}
+
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
@@ -261,6 +306,59 @@ mod tests {
 
         limiter.reset();
         assert_eq!(limiter.available_tokens(), 5);
+    }
+
+    #[test]
+    fn test_metrics_record_acquire_and_reject() {
+        let config = RateLimitConfig {
+            max_requests: 1,
+            window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
+        };
+        let mut limiter = RateLimiter::with_config(config);
+
+        assert!(limiter.try_acquire());
+        assert_eq!(limiter.metrics().acquired_requests(), 1);
+        assert_eq!(limiter.metrics().rejected_requests(), 0);
+
+        assert!(!limiter.try_acquire());
+        assert_eq!(limiter.metrics().acquired_requests(), 1);
+        assert_eq!(limiter.metrics().rejected_requests(), 1);
+    }
+
+    #[test]
+    fn test_metrics_record_batch_reject() {
+        let config = RateLimitConfig {
+            max_requests: 3,
+            window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
+        };
+        let mut limiter = RateLimiter::with_config(config);
+
+        assert!(limiter.try_acquire_batch(2));
+        assert_eq!(limiter.metrics().acquired_requests(), 1);
+        assert_eq!(limiter.metrics().rejected_requests(), 0);
+
+        assert!(!limiter.try_acquire_batch(2));
+        assert_eq!(limiter.metrics().acquired_requests(), 1);
+        assert_eq!(limiter.metrics().rejected_requests(), 1);
+    }
+
+    #[test]
+    fn test_metrics_refill_event() {
+        let config = RateLimitConfig {
+            max_requests: 1,
+            window: Duration::from_secs(1),
+            strategy: RateLimitStrategy::TokenBucket,
+        };
+        let mut limiter = RateLimiter::with_config(config);
+
+        assert!(limiter.try_acquire());
+        assert_eq!(limiter.available_tokens(), 0);
+
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(limiter.available_tokens() > 0);
+        assert!(limiter.metrics().refill_events() > 0);
     }
 
     #[test]

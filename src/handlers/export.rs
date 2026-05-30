@@ -47,6 +47,32 @@ impl Default for ExportQuery {
     }
 }
 
+impl ExportQuery {
+    /// Validate the export query parameters before running the export.
+    pub fn validate(&self) -> Result<(), AppError> {
+        let format = self.format.to_lowercase();
+        if format != "csv" && format != "json" {
+            return Err(AppError::Validation(
+                "Export format must be either 'csv' or 'json'".to_string(),
+            ));
+        }
+
+        if let Some(ref from) = self.from {
+            parse_date(from)
+                .map(|_| ())
+                .map_err(|msg| AppError::Validation(msg))?;
+        }
+
+        if let Some(ref to) = self.to {
+            parse_date(to)
+                .map(|_| ())
+                .map_err(|msg| AppError::Validation(msg))?;
+        }
+
+        Ok(())
+    }
+}
+
 /// CSV row representation - uses String for amount to avoid Serialize issues with BigDecimal
 #[derive(Serialize)]
 struct TransactionCsvRow {
@@ -429,6 +455,7 @@ pub async fn export_transactions_csv(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    query.validate()?;
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -448,6 +475,7 @@ pub async fn export_transactions_json(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    query.validate()?;
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -467,6 +495,7 @@ pub async fn export_transactions(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    query.validate()?;
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
