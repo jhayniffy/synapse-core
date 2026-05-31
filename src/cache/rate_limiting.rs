@@ -115,6 +115,12 @@ struct Inner {
     tokens: AtomicU32,
     /// Epoch millis of the last refill, stored as u64.
     last_refill_ms: AtomicU64,
+    /// Count of successful token acquisitions.
+    acquired: AtomicU64,
+    /// Count of rejected requests (insufficient tokens).
+    rejected: AtomicU64,
+    /// Count of token refill events.
+    refills: AtomicU64,
 }
 
 /// Rate limiter for controlling request rates.
@@ -148,6 +154,9 @@ impl RateLimiter {
             inner: Arc::new(Inner {
                 tokens: AtomicU32::new(config.max_requests),
                 last_refill_ms: AtomicU64::new(now_ms),
+                acquired: AtomicU64::new(0),
+                rejected: AtomicU64::new(0),
+                refills: AtomicU64::new(0),
             }),
             config,
         }
@@ -169,6 +178,7 @@ impl RateLimiter {
         loop {
             let current = self.inner.tokens.load(Ordering::Acquire);
             if current < count {
+                self.inner.rejected.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
             if self
@@ -177,6 +187,7 @@ impl RateLimiter {
                 .compare_exchange(current, current - count, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                self.inner.acquired.fetch_add(1, Ordering::Relaxed);
                 return true;
             }
         }
@@ -213,7 +224,15 @@ impl RateLimiter {
         self.inner.last_refill_ms.store(epoch_ms(), Ordering::Release);
     }
 
-    /// Refills tokens proportionally to elapsed time (integer arithmetic).
+    /// Returns a snapshot of the current metrics (acquired, rejected, refill events).
+    pub fn metrics(&self) -> CacheMetrics {
+        CacheMetrics {
+            acquired_requests: self.inner.acquired.load(Ordering::Relaxed),
+            rejected_requests: self.inner.rejected.load(Ordering::Relaxed),
+            refill_events: self.inner.refills.load(Ordering::Relaxed),
+        }
+    }
+
     fn refill_tokens(&self) {
         let now_ms = epoch_ms();
         let last_ms = self.inner.last_refill_ms.load(Ordering::Acquire);
@@ -229,6 +248,7 @@ impl RateLimiter {
             // Full window elapsed — reset to max.
             self.inner.tokens.store(self.config.max_requests, Ordering::Release);
             self.inner.last_refill_ms.store(now_ms, Ordering::Release);
+            self.inner.refills.fetch_add(1, Ordering::Relaxed);
         } else {
             // Partial refill: tokens_to_add = max * elapsed / window (integer, no float).
             let tokens_to_add =
@@ -238,6 +258,7 @@ impl RateLimiter {
                 let new_val = (current + tokens_to_add).min(self.config.max_requests);
                 self.inner.tokens.store(new_val, Ordering::Release);
                 self.inner.last_refill_ms.store(now_ms, Ordering::Release);
+                self.inner.refills.fetch_add(1, Ordering::Relaxed);
             }
         }
     }

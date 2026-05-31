@@ -92,7 +92,7 @@ impl AppState {
             AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
-            pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None)
+            pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None, 10)
                 .await
                 .unwrap(),
             horizon_client: HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
