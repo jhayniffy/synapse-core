@@ -22,6 +22,7 @@
 //!
 //! See [Health Checks Documentation](../../docs/graphql-health-checks.md) for detailed information.
 
+pub mod error;
 pub mod input_validation;
 pub mod pagination;
 pub mod rate_limiting;
